@@ -15,51 +15,65 @@ jobs:
     steps:
       - name: Checkout build repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Checkout upstream firmware v2.5.2
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           repository: 78/xiaozhi-esp32
           ref: v2.5.2
           path: src
+          fetch-depth: 1
+
+      - name: Env probe
+        continue-on-error: true
+        run: |
+          {
+            echo "=== id ==="; id
+            echo "=== IDF_PATH=$IDF_PATH ==="
+            ls -la /opt/esp/idf/export.sh 2>&1 || echo "MISSING export.sh"
+            echo "=== python ==="; python --version 2>&1
+            echo "=== src ==="; ls -d src 2>&1; ls src/main/boards/otto-robot 2>&1 | head -5
+          } > /tmp/env.log 2>&1 || true
+          cat /tmp/env.log
 
       - name: Apply patches
+        continue-on-error: true
         run: |
-          set -e
-          cd src
-          sed -i 's/#define HAND_HOME_POSITION 45/#define HAND_HOME_POSITION 0/' main/boards/otto-robot/otto_movements.cc
-          sed -i 's/PowerSaveLevel::LOW_POWER/PowerSaveLevel::PERFORMANCE/g' main/application.cc
-          echo "=== verify patches ==="
-          grep -n 'define HAND_HOME_POSITION' main/boards/otto-robot/otto_movements.cc
-          echo "LOW_POWER remaining: $(grep -c 'LOW_POWER' main/application.cc || true)"
-          echo "PERFORMANCE applied: $(grep -c 'PowerSaveLevel::PERFORMANCE' main/application.cc || true)"
+          {
+            cd src || exit 1
+            sed -i 's/#define HAND_HOME_POSITION 45/#define HAND_HOME_POSITION 0/' main/boards/otto-robot/otto_movements.cc
+            sed -i 's/PowerSaveLevel::LOW_POWER/PowerSaveLevel::PERFORMANCE/g' main/application.cc
+            echo "=== patched ==="
+            grep -n 'define HAND_HOME_POSITION' main/boards/otto-robot/otto_movements.cc
+            echo "LOW_POWER_LEFT=$(grep -c 'LOW_POWER' main/application.cc || true)"
+            echo "PERF_APPLIED=$(grep -c 'PowerSaveLevel::PERFORMANCE' main/application.cc || true)"
+          } > /tmp/patch.log 2>&1
+          cat /tmp/patch.log
 
       - name: Build otto-robot
+        continue-on-error: true
         run: |
-          set -e
-          cd src
-          . $IDF_PATH/export.sh
-          python scripts/build.py otto-robot --name otto-robot
-          echo "=== build outputs ==="
-          ls -la build/*.bin || true
+          cd src || exit 1
+          source "$IDF_PATH/export.sh" > /tmp/export.log 2>&1 || echo "export.sh failed" >> /tmp/export.log
+          python scripts/build.py otto-robot --name otto-robot > /tmp/build.log 2>&1
+          echo "BUILD_EXIT=$?" >> /tmp/build.log
+          tail -40 /tmp/build.log
 
-      - name: Publish binaries back to repo
+      - name: Publish results
+        if: always()
         run: |
-          set -e
           mkdir -p "$GITHUB_WORKSPACE/fw"
-          cp src/build/xiaozhi.bin "$GITHUB_WORKSPACE/fw/app.bin"
-          if [ -f src/build/merged-binary.bin ]; then cp src/build/merged-binary.bin "$GITHUB_WORKSPACE/fw/merged.bin"; fi
-          ls -la "$GITHUB_WORKSPACE/fw"
+          cp -f /tmp/env.log /tmp/patch.log /tmp/export.log "$GITHUB_WORKSPACE/fw/" 2>/dev/null || true
+          cp -f /tmp/build.log "$GITHUB_WORKSPACE/fw/" 2>/dev/null || true
+          cp -f src/build/xiaozhi.bin "$GITHUB_WORKSPACE/fw/app.bin" 2>/dev/null || echo "app.bin MISSING" > "$GITHUB_WORKSPACE/fw/app.missing"
+          cp -f src/build/merged-binary.bin "$GITHUB_WORKSPACE/fw/merged.bin" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/fw" || true
           cd "$GITHUB_WORKSPACE"
           git config user.email "actions@github.com"
           git config user.name "github-actions"
           git add -f fw
-          git commit -m "firmware $(date -u +%Y%m%dT%H%M%SZ)" || echo "no changes"
-          git push origin HEAD:main
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: otto-firmware
-          path: fw/*.bin
-          if-no-files-found: warn
+          git commit -m "result $(date -u +%Y%m%dT%H%M%SZ)" || echo "nothing to commit"
+          git push origin HEAD:main || echo "push failed"
